@@ -1,4 +1,3 @@
-
 import json
 import math
 import urllib.parse
@@ -6,38 +5,28 @@ import boto3
 
 s3 = boto3.client("s3")
 
-# ============================================================
-# CONFIGURAÇÕES
-# ============================================================
-
-FEATURES = ["temperature", "humidity", "co2_level"]
-
+# Limiar padrão para o Teste Kolmogorov-Smirnov
 KS_THRESHOLD = 0.20
 
-# Thresholds do Model Drift
-RMSE_THRESHOLD = {"temperature": 0.50, "humidity": 2.00, "co2_level": 20.0}
-
-MAE_THRESHOLD = {"temperature": 0.40, "humidity": 1.50, "co2_level": 15.0}
-
 
 # ============================================================
-# LEITURA CSV
+# PARSER CSV DINÂMICO
 # ============================================================
 
 
-def parse_csv_column(csv_text, column_name):
+def parse_csv_all_columns(csv_text):
+    """
+    Lê o CSV em formato texto e retorna um dicionário com os nomes
+    das colunas e suas respectivas listas de valores float.
+    Exemplo: {'temperatura': [23.1, 24.0], 'umidade': [60.0, 58.5]}
+    """
     lines = csv_text.splitlines()
 
     if not lines:
-        return []
+        return {}
 
-    headers = lines[0].split(",")
-
-    if column_name not in headers:
-        return []
-
-    idx = headers.index(column_name)
-    values = []
+    headers = [col.strip() for col in lines[0].split(",")]
+    columns_data = {header: [] for header in headers}
 
     for line in lines[1:]:
         if not line.strip():
@@ -45,48 +34,43 @@ def parse_csv_column(csv_text, column_name):
 
         cols = line.split(",")
 
-        if len(cols) <= idx:
+        if len(cols) != len(headers):
             continue
 
-        try:
-            values.append(float(cols[idx]))
-        except ValueError:
-            pass
+        for header, val in zip(headers, cols):
+            try:
+                columns_data[header].append(float(val.strip()))
+            except ValueError:
+                pass
 
-    return values
+    return columns_data
 
 
 # ============================================================
-# TESTE KS
+# TESTE KOLMOGOROV-SMIRNOV (DATA DRIFT)
 # ============================================================
 
 
 def simple_ks_test(data1, data2):
-    n1 = len(data1)
-    n2 = len(data2)
+    n1, n2 = len(data1), len(data2)
 
     if n1 == 0 or n2 == 0:
         return 0.0
 
-    d1 = sorted(data1)
-    d2 = sorted(data2)
-
+    d1, d2 = sorted(data1), sorted(data2)
     values = sorted(list(set(data1 + data2)))
 
-    i1 = 0
-    i2 = 0
+    i1, i2 = 0, 0
     max_d = 0.0
 
     for v in values:
         while i1 < n1 and d1[i1] <= v:
             i1 += 1
-
         while i2 < n2 and d2[i2] <= v:
             i2 += 1
 
         f1 = i1 / n1
         f2 = i2 / n2
-
         d = abs(f1 - f2)
 
         if d > max_d:
@@ -96,35 +80,25 @@ def simple_ks_test(data1, data2):
 
 
 # ============================================================
-# MÉTRICAS DE REGRESSÃO
+# MÉTRICAS DE MODEL DRIFT (REGRESSÃO / CLASSIFICAÇÃO)
 # ============================================================
 
 
-def mae(y_true, y_pred):
-    if len(y_true) == 0:
-        return None
+def calculate_regression_metrics(y_true, y_pred):
+    n = len(y_true)
 
-    return sum(abs(a - b) for a, b in zip(y_true, y_pred)) / len(y_true)
+    if n == 0:
+        return {}
 
+    mae = sum(abs(a - b) for a, b in zip(y_true, y_pred)) / n
+    mse = sum((a - b) ** 2 for a, b in zip(y_true, y_pred)) / n
+    rmse = math.sqrt(mse)
 
-def mse(y_true, y_pred):
-    if len(y_true) == 0:
-        return None
-
-    return sum((a - b) ** 2 for a, b in zip(y_true, y_pred)) / len(y_true)
-
-
-def rmse(y_true, y_pred):
-    value = mse(y_true, y_pred)
-
-    if value is None:
-        return None
-
-    return math.sqrt(value)
+    return {"mae": round(mae, 4), "rmse": round(rmse, 4)}
 
 
 # ============================================================
-# LEITURA DOS ARQUIVOS S3
+# AUXILIARES S3
 # ============================================================
 
 
@@ -141,8 +115,17 @@ def file_exists(bucket, key):
         return False
 
 
+def save_s3_json(bucket, key, payload):
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=json.dumps(payload, indent=2),
+        ContentType="application/json",
+    )
+
+
 # ============================================================
-# INÍCIO DA LAMBDA
+# EXECUÇÃO PRINCIPAL
 # ============================================================
 
 
@@ -154,186 +137,104 @@ def lambda_handler(event, context):
     )
 
     print("=" * 60)
-    print("MONITORAMENTO DE DRIFT")
+    print("MONITORAMENTO DE DRIFT MULTI-TENANT AWS")
     print("=" * 60)
-    print("Arquivo recebido:", key)
+    print("Arquivo capturado:", key)
 
     parts = key.split("/")
 
+    # Exemplo: inference/modelo_01/2026-07-29.csv
     if len(parts) < 3 or parts[0] != "inference":
+        print("Arquivo fora da estrutura 'inference/{endpoint_id}/{data}.csv'")
         return {"statusCode": 200, "body": "Ignorado"}
 
-    endpoint = parts[1]
+    endpoint_id = parts[1]
     filename = parts[-1]
+    data_id = filename.replace(".csv", "")
 
-    baseline_key = f"baseline/{endpoint}.csv"
-    ground_truth_key = f"ground_truth/{endpoint}/{filename}"
-    report_key = f"reports/{endpoint}/{filename.replace('.csv', '.json')}"
+    # Mapeamento dos endereços conforme a documentação
+    baseline_key = f"baseline/{endpoint_id}.csv"
+    ground_truth_key = f"ground_truth/{endpoint_id}/{filename}"
+    data_drift_report_key = f"reports/{endpoint_id}/data_drift/{data_id}.json"
+    model_drift_report_key = f"reports/{endpoint_id}/model_drift/{data_id}.json"
 
-    print("Endpoint:", endpoint)
-    print("Baseline:", baseline_key)
-    print("Ground Truth:", ground_truth_key)
+    print("Endpoint ID:", endpoint_id)
+    print("Data/Lote:", data_id)
 
-    # ============================================================
-    # LEITURA DOS ARQUIVOS
-    # ============================================================
-
+    # 1. Carregar Arquivo de Inferência
     try:
-        baseline_text = read_s3_text(bucket, baseline_key)
+        inference_text = read_s3_text(bucket, key)
+        inference_data = parse_csv_all_columns(inference_text)
     except Exception as e:
-        print("Baseline não encontrado.")
-        print(str(e))
-        return {"statusCode": 404, "body": "Baseline nao encontrado."}
+        print(f"Erro ao ler inferência: {str(e)}")
+        return {"statusCode": 500, "body": "Erro ao ler inferencia"}
 
-    inference_text = read_s3_text(bucket, key)
+    # ============================================================
+    # EXECUÇÃO DO DATA DRIFT
+    # ============================================================
 
-    has_ground_truth = file_exists(bucket, ground_truth_key)
+    if file_exists(bucket, baseline_key):
+        baseline_text = read_s3_text(bucket, baseline_key)
+        baseline_data = parse_csv_all_columns(baseline_text)
 
-    if has_ground_truth:
+        ks_statistics = {}
+        drift_detected = False
+
+        for col_name, inf_values in inference_data.items():
+            if col_name in baseline_data and len(inf_values) > 0:
+                base_values = baseline_data[col_name]
+
+                ks_stat = simple_ks_test(base_values, inf_values)
+                ks_statistics[col_name] = round(ks_stat, 4)
+
+                if ks_stat > KS_THRESHOLD:
+                    drift_detected = True
+
+        data_drift_payload = {
+            "endpoint": endpoint_id,
+            "drift_detected": drift_detected,
+            "ks_statistics": ks_statistics,
+        }
+
+        save_s3_json(bucket, data_drift_report_key, data_drift_payload)
+        print(f"Relatório de Data Drift salvo em: s3://{bucket}/{data_drift_report_key}")
+    else:
+        print(f"Baseline 's3://{bucket}/{baseline_key}' não encontrado. Data Drift ignorado.")
+
+    # ============================================================
+    # EXECUÇÃO DO MODEL DRIFT (SE GROUND TRUTH ESTIVER DISPONÍVEL)
+    # ============================================================
+
+    if file_exists(bucket, ground_truth_key):
         ground_truth_text = read_s3_text(bucket, ground_truth_key)
-        print("Ground Truth encontrado.")
-    else:
-        ground_truth_text = None
-        print("Ground Truth ainda não disponível.")
+        ground_truth_data = parse_csv_all_columns(ground_truth_text)
 
-    # ============================================================
-    # RELATÓRIO
-    # ============================================================
+        target_col = None
+        for col in ground_truth_data.keys():
+            if col in inference_data:
+                target_col = col
+                break
 
-    report = {
-        "endpoint_id": endpoint,
-        "processed_file": key,
-        "data_drift": {},
-        "model_drift": {},
-    }
+        if target_col:
+            y_pred = inference_data[target_col]
+            y_true = ground_truth_data[target_col]
 
-    # ============================================================
-    # DATA DRIFT
-    # ============================================================
+            metrics = calculate_regression_metrics(y_true, y_pred)
 
-    print("\n========== DATA DRIFT ==========")
-
-    for feature in FEATURES:
-        baseline = parse_csv_column(baseline_text, feature)
-        inference = parse_csv_column(inference_text, feature)
-
-        if len(baseline) == 0 or len(inference) == 0:
-            continue
-
-        ks = simple_ks_test(baseline, inference)
-        drift = ks > KS_THRESHOLD
-
-        print(
-            feature,
-            "KS=",
-            round(ks, 4),
-            "Drift=",
-            drift,
-        )
-
-        report["data_drift"][feature] = {
-            "ks_distance": round(ks, 4),
-            "threshold": KS_THRESHOLD,
-            "has_drift": drift,
-        }
-
-    # ============================================================
-    # MODEL DRIFT
-    # ============================================================
-
-    if has_ground_truth:
-        print("\n========== MODEL DRIFT ==========")
-
-        for feature in FEATURES:
-            prediction = parse_csv_column(inference_text, feature)
-            truth = parse_csv_column(ground_truth_text, feature)
-
-            if len(prediction) == 0 or len(truth) == 0:
-                continue
-
-            current_rmse = rmse(truth, prediction)
-            current_mae = mae(truth, prediction)
-
-            drift = (
-                current_rmse > RMSE_THRESHOLD[feature]
-                or current_mae > MAE_THRESHOLD[feature]
-            )
-
-            print(
-                feature,
-                "RMSE=",
-                round(current_rmse, 4),
-                "MAE=",
-                round(current_mae, 4),
-                "Drift=",
-                drift,
-            )
-
-            report["model_drift"][feature] = {
-                "rmse": round(current_rmse, 4),
-                "mae": round(current_mae, 4),
-                "rmse_threshold": RMSE_THRESHOLD[feature],
-                "mae_threshold": MAE_THRESHOLD[feature],
-                "has_drift": drift,
+            model_drift_payload = {
+                "endpoint": endpoint_id,
+                "metrics": metrics,
+                "model_drift": False,
             }
+
+            save_s3_json(bucket, model_drift_report_key, model_drift_payload)
+            print(f"Relatório de Model Drift salvo em: s3://{bucket}/{model_drift_report_key}")
+        else:
+            print("Não foi encontrada coluna correspondente entre Inferencia e Ground Truth.")
     else:
-        report["model_drift"] = {
-            "status": "Ground Truth ainda nao disponivel."
-        }
+        print(f"Ground Truth ainda não disponível em 's3://{bucket}/{ground_truth_key}'.")
 
-    # ============================================================
-    # RESUMO GERAL
-    # ============================================================
-
-    total_data_drift = sum(
-        1
-        for v in report["data_drift"].values()
-        if v.get("has_drift", False)
-    )
-
-    if (
-        isinstance(report["model_drift"], dict)
-        and "status" not in report["model_drift"]
-    ):
-        total_model_drift = sum(
-            1
-            for v in report["model_drift"].values()
-            if v.get("has_drift", False)
-        )
-    else:
-        total_model_drift = None
-
-    report["summary"] = {
-        "total_features": len(FEATURES),
-        "features_with_data_drift": total_data_drift,
-        "features_with_model_drift": total_model_drift,
-        "ground_truth_available": has_ground_truth,
+    return {
+        "statusCode": 200,
+        "body": json.dumps({"status": "Sucesso", "endpoint": endpoint_id}),
     }
-
-    # ============================================================
-    # SALVA RELATÓRIO NO S3
-    # ============================================================
-
-    s3.put_object(
-        Bucket=bucket,
-        Key=report_key,
-        Body=json.dumps(report, indent=4),
-        ContentType="application/json",
-    )
-
-    print("\n" + "=" * 60)
-    print("RELATÓRIO GERADO")
-    print("=" * 60)
-    print(json.dumps(report, indent=4))
-    print("=" * 60)
-    print("Relatório salvo em:")
-    print(f"s3://{bucket}/{report_key}")
-    print("=" * 60)
-
-    # ============================================================
-    # RETORNO DA LAMBDA
-    # ============================================================
-
-    return {"statusCode": 200, "body": json.dumps(report, indent=4)}
-
-
