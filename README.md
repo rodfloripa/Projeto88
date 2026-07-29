@@ -182,6 +182,14 @@ aws s3api put-bucket-notification-configuration \
 
 ## Validacao do Pipeline
 
+### Resumo do Comportamento da Lambda ao Receber o Upload
+
+<p align="justify">Quando um novo arquivo de inferência é enviado para a pasta de entrada no S3, a execução da função Lambda segue a seguinte sequência lógica baseada nos prefixos do caminho:</p>
+
+1. **Extração do Endpoint:** Ao receber o evento de upload em `s3://BUCKET/inference/estufa_01/lote_01.csv`, a Lambda faz o parse da chave (<i>key</i>) e extrai dinamicamente o identificador do endpoint: **`estufa_01`**.
+2. **Busca do Baseline:** Em seguida, ela busca automaticamente o arquivo de referência correspondente em `s3://BUCKET/baseline/estufa_01.csv`.
+3. **Persistência do Relatório:** Após realizar os testes estatísticos de drift para cada variável, o relatório final é gerado e salvo mantendo a mesma estrutura de pastas em `s3://BUCKET/reports/estufa_01/lote_01.json`.
+
 ### Upload do Baseline
 
 ```bash
