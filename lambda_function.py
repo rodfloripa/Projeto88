@@ -1,32 +1,35 @@
 import json
 import math
 import urllib.parse
+from collections import Counter
 import boto3
 
 s3 = boto3.client("s3")
 
-# Limiar padrão para o Teste Kolmogorov-Smirnov
+# Limiar padrão para o Teste KS e Qui-Quadrado
 KS_THRESHOLD = 0.20
+CHI2_THRESHOLD = 0.20
 
 
 # ============================================================
-# PARSER CSV DINÂMICO
+# PARSER CSV INTELIGENTE (SUPORTA NÚMEROS E TEXTOS)
 # ============================================================
 
 
-def parse_csv_all_columns(csv_text):
+def parse_csv_typed(csv_text):
     """
-    Lê o CSV em formato texto e retorna um dicionário com os nomes
-    das colunas e suas respectivas listas de valores float.
-    Exemplo: {'temperatura': [23.1, 24.0], 'umidade': [60.0, 58.5]}
+    Lê o CSV e identifica automaticamente o tipo de cada coluna.
+    Retorna dois dicionários: um para colunas numéricas e outro para texto.
     """
     lines = csv_text.splitlines()
 
     if not lines:
-        return {}
+        return {}, {}
 
     headers = [col.strip() for col in lines[0].split(",")]
-    columns_data = {header: [] for header in headers}
+    
+    numeric_cols = {header: [] for header in headers}
+    text_cols = {header: [] for header in headers}
 
     for line in lines[1:]:
         if not line.strip():
@@ -38,16 +41,23 @@ def parse_csv_all_columns(csv_text):
             continue
 
         for header, val in zip(headers, cols):
+            val_str = val.strip()
             try:
-                columns_data[header].append(float(val.strip()))
+                # Tenta converter para float (coluna numérica)
+                numeric_cols[header].append(float(val_str))
             except ValueError:
-                pass
+                # Se falhar, armazena como texto (coluna categórica)
+                text_cols[header].append(val_str)
 
-    return columns_data
+    # Filtra mantendo apenas colunas que realmente possuem dados no seu respectivo tipo
+    final_numeric = {k: v for k, v in numeric_cols.items() if len(v) > 0}
+    final_text = {k: v for k, v in text_cols.items() if len(v) > 0 and k not in final_numeric}
+
+    return final_numeric, final_text
 
 
 # ============================================================
-# TESTE KOLMOGOROV-SMIRNOV (DATA DRIFT)
+# TESTE KOLMOGOROV-SMIRNOV (PARA VARIÁVEIS NUMÉRICAS)
 # ============================================================
 
 
@@ -80,13 +90,42 @@ def simple_ks_test(data1, data2):
 
 
 # ============================================================
-# MÉTRICAS DE MODEL DRIFT (REGRESSÃO / CLASSIFICAÇÃO)
+# DISTÂNCIA DE PROPORÇÃO / CHI-SQUARE SIMPLIFICADO (PARA TEXTO)
+# ============================================================
+
+
+def categorical_drift_test(data1, data2):
+    """
+    Calcula a maior variação percentual na frequência das categorias
+    entre o conjunto de baseline e o de inferência.
+    """
+    n1, n2 = len(data1), len(data2)
+    if n1 == 0 or n2 == 0:
+        return 0.0
+
+    count1 = Counter(data1)
+    count2 = Counter(data2)
+
+    all_categories = set(count1.keys()).union(set(count2.keys()))
+    max_diff = 0.0
+
+    for cat in all_categories:
+        prop1 = count1[cat] / n1
+        prop2 = count2[cat] / n2
+        diff = abs(prop1 - prop2)
+        if diff > max_diff:
+            max_diff = diff
+
+    return max_diff
+
+
+# ============================================================
+# MÉTRICAS DE MODEL DRIFT
 # ============================================================
 
 
 def calculate_regression_metrics(y_true, y_pred):
     n = len(y_true)
-
     if n == 0:
         return {}
 
@@ -125,7 +164,7 @@ def save_s3_json(bucket, key, payload):
 
 
 # ============================================================
-# EXECUÇÃO PRINCIPAL
+# LAMBDA HANDLER
 # ============================================================
 
 
@@ -137,57 +176,60 @@ def lambda_handler(event, context):
     )
 
     print("=" * 60)
-    print("MONITORAMENTO DE DRIFT MULTI-TENANT AWS")
+    print("MONITORAMENTO DE DRIFT (SUPORTE A DADOS MISTOS)")
     print("=" * 60)
-    print("Arquivo capturado:", key)
 
     parts = key.split("/")
 
-    # Exemplo: inference/modelo_01/2026-07-29.csv
     if len(parts) < 3 or parts[0] != "inference":
-        print("Arquivo fora da estrutura 'inference/{endpoint_id}/{data}.csv'")
         return {"statusCode": 200, "body": "Ignorado"}
 
     endpoint_id = parts[1]
     filename = parts[-1]
     data_id = filename.replace(".csv", "")
 
-    # Mapeamento dos endereços conforme a documentação
     baseline_key = f"baseline/{endpoint_id}.csv"
     ground_truth_key = f"ground_truth/{endpoint_id}/{filename}"
     data_drift_report_key = f"reports/{endpoint_id}/data_drift/{data_id}.json"
     model_drift_report_key = f"reports/{endpoint_id}/model_drift/{data_id}.json"
 
-    print("Endpoint ID:", endpoint_id)
-    print("Data/Lote:", data_id)
-
-    # 1. Carregar Arquivo de Inferência
+    # Carregar Inferência
     try:
         inference_text = read_s3_text(bucket, key)
-        inference_data = parse_csv_all_columns(inference_text)
+        inf_numeric, inf_text = parse_csv_typed(inference_text)
     except Exception as e:
         print(f"Erro ao ler inferência: {str(e)}")
-        return {"statusCode": 500, "body": "Erro ao ler inferencia"}
+        return {"statusCode": 500, "body": "Erro ao processar CSV"}
 
     # ============================================================
-    # EXECUÇÃO DO DATA DRIFT
+    # DATA DRIFT (NUMÉRICO + CATEGÓRICO)
     # ============================================================
 
     if file_exists(bucket, baseline_key):
         baseline_text = read_s3_text(bucket, baseline_key)
-        baseline_data = parse_csv_all_columns(baseline_text)
+        base_numeric, base_text = parse_csv_typed(baseline_text)
 
         ks_statistics = {}
         drift_detected = False
 
-        for col_name, inf_values in inference_data.items():
-            if col_name in baseline_data and len(inf_values) > 0:
-                base_values = baseline_data[col_name]
-
-                ks_stat = simple_ks_test(base_values, inf_values)
+        # 1. Avalia colunas numéricas via KS Test
+        for col_name, inf_vals in inf_numeric.items():
+            if col_name in base_numeric:
+                base_vals = base_numeric[col_name]
+                ks_stat = simple_ks_test(base_vals, inf_vals)
                 ks_statistics[col_name] = round(ks_stat, 4)
 
                 if ks_stat > KS_THRESHOLD:
+                    drift_detected = True
+
+        # 2. Avalia colunas não numéricas (texto/categóricas) via Proporção
+        for col_name, inf_vals in inf_text.items():
+            if col_name in base_text:
+                base_vals = base_text[col_name]
+                cat_stat = categorical_drift_test(base_vals, inf_vals)
+                ks_statistics[col_name] = round(cat_stat, 4)
+
+                if cat_stat > CHI2_THRESHOLD:
                     drift_detected = True
 
         data_drift_payload = {
@@ -197,27 +239,25 @@ def lambda_handler(event, context):
         }
 
         save_s3_json(bucket, data_drift_report_key, data_drift_payload)
-        print(f"Relatório de Data Drift salvo em: s3://{bucket}/{data_drift_report_key}")
-    else:
-        print(f"Baseline 's3://{bucket}/{baseline_key}' não encontrado. Data Drift ignorado.")
+        print(f"Relatório Data Drift gerado com sucesso.")
 
     # ============================================================
-    # EXECUÇÃO DO MODEL DRIFT (SE GROUND TRUTH ESTIVER DISPONÍVEL)
+    # MODEL DRIFT
     # ============================================================
 
     if file_exists(bucket, ground_truth_key):
         ground_truth_text = read_s3_text(bucket, ground_truth_key)
-        ground_truth_data = parse_csv_all_columns(ground_truth_text)
+        gt_numeric, _ = parse_csv_typed(ground_truth_text)
 
         target_col = None
-        for col in ground_truth_data.keys():
-            if col in inference_data:
+        for col in gt_numeric.keys():
+            if col in inf_numeric:
                 target_col = col
                 break
 
         if target_col:
-            y_pred = inference_data[target_col]
-            y_true = ground_truth_data[target_col]
+            y_pred = inf_numeric[target_col]
+            y_true = gt_numeric[target_col]
 
             metrics = calculate_regression_metrics(y_true, y_pred)
 
@@ -228,13 +268,6 @@ def lambda_handler(event, context):
             }
 
             save_s3_json(bucket, model_drift_report_key, model_drift_payload)
-            print(f"Relatório de Model Drift salvo em: s3://{bucket}/{model_drift_report_key}")
-        else:
-            print("Não foi encontrada coluna correspondente entre Inferencia e Ground Truth.")
-    else:
-        print(f"Ground Truth ainda não disponível em 's3://{bucket}/{ground_truth_key}'.")
+            print(f"Relatório Model Drift gerado com sucesso.")
 
-    return {
-        "statusCode": 200,
-        "body": json.dumps({"status": "Sucesso", "endpoint": endpoint_id}),
-    }
+    return {"statusCode": 200, "body": json.dumps({"status": "Sucesso"})}
