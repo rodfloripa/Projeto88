@@ -1,5 +1,5 @@
 
-# Monitoramento de Drift dos Dados e Drift do Modelo de Multiplos Modelos na AWS
+# Monitoramento de Drift de Multiplos Modelos na AWS
 
 <p align="justify">Este projeto implementa uma solucao serverless, automatizada e de baixo custo para monitoramento continuo de Drift dos Dados e Drift do Modelo em pipelines de Machine Learning multi-tenant na AWS. A arquitetura e totalmente orientada a eventos, acionada via Amazon S3 e executada atraves do AWS Lambda em Python 3.11, utilizando uma abordagem estrita via AWS CLI e sem dependencia de interfaces visuais pesadas.</p>
 
