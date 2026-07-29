@@ -1,5 +1,4 @@
-temperature,humidity,co2_level
-38.5,85.0,950.0
-39.1,86.2,960.0
-40.0,87.0,980.0
-38.9,84.5,945.0
+temperatura,umidade,pressao,status_sensor
+28.1,75.0,1008.2,normal
+29.4,78.2,1007.5,manutencao
+27.8,74.1,1008.0,alerta
