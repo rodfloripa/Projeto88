@@ -1,7 +1,9 @@
 
 # Monitoramento de Drift de Multiplos Modelos na AWS
 
-<p align="justify">Este projeto implementa uma solucao serverless, automatizada e de baixo custo para monitoramento de Data Drift em pipelines de Machine Learning multi-tenant na AWS. A arquitetura e totalmente orientada a eventos, acionada via Amazon S3 e executada atraves do AWS Lambda em Python 3.11, utilizando uma abordagem estrita via CLI e sem dependencia de interfaces visuais pesadas.</p>
+<p align="justify">Este projeto implementa uma solucao serverless, automatizada e de baixo custo para monitoramento de Data Drift em pipelines de Machine Learning multi-tenant na AWS. A arquitetura e totalmente orientada a eventos, acionada via Amazon S3 e executada atraves do AWS Lambda em Python 3.11, utilizando uma abordagem estrita via AWS CLI e sem dependencia de interfaces visuais pesadas.</p>
+
+<p align="justify">Como diferencial, esta implementacao prioriza simplicidade operacional. Enquanto solucoes como o Evidently AI normalmente exigem uma estrutura mais complexa, envolvendo diversos arquivos de configuracao, dependencias adicionais, dashboards, servicos auxiliares e, em alguns cenarios, componentes baseados em Node.js para interfaces e visualizacoes, esta abordagem utiliza apenas recursos nativos da AWS, uma unica funcao Lambda e comandos da AWS CLI. Isso reduz significativamente a complexidade de implantacao, manutencao e operacao, tornando a solucao mais leve, portavel e adequada para ambientes de producao que necessitam monitorar multiplos modelos com baixo custo e minima sobrecarga operacional.</p>
 
 ---
 
