@@ -182,13 +182,19 @@ aws s3api put-bucket-notification-configuration \
 
 ## Validacao do Pipeline
 
-### Resumo do Comportamento da Lambda ao Receber o Upload
+### Mapeamento de Arquivos de Relatório (Data Drift vs. Model Drift)
 
-<p align="justify">Quando um novo arquivo de inferência é enviado para a pasta de entrada no S3, a execução da função Lambda segue a seguinte sequência lógica baseada nos prefixos do caminho:</p>
+<p align="justify">A arquitetura reutiliza exatamente a mesma regra de nomenclatura para relatórios de Data Drift (características de entrada) e Model/Concept Drift (saídas e predições). O relatório gerado na pasta <code>reports/</code> preserva o identificador do endpoint e o nome exato do lote processado, alterando apenas a extensão de entrada para formato JSON.</p>
 
-1. **Extração do Endpoint:** Ao receber o evento de upload em `s3://BUCKET/inference/estufa_01/lote_01.csv`, a Lambda faz o parse da chave (<i>key</i>) e extrai dinamicamente o identificador do endpoint: **`estufa_01`**.
-2. **Busca do Baseline:** Em seguida, ela busca automaticamente o arquivo de referência correspondente em `s3://BUCKET/baseline/estufa_01.csv`.
-3. **Persistência do Relatório:** Após realizar os testes estatísticos de drift para cada variável, o relatório final é gerado e salvo mantendo a mesma estrutura de pastas em `s3://BUCKET/reports/estufa_01/lote_01.json`.
+* **Data Drift (Input Features):**
+  * Input: <code>s3://BUCKET/inference/modelo_v1/lote_2026_07_29.csv</code>
+  * Baseline: <code>s3://BUCKET/baseline/modelo_v1.csv</code>
+  * Output: <code>s3://BUCKET/reports/modelo_v1/lote_2026_07_29.json</code>
+
+* **Model Drift (Output/Predictions):**
+  * Input: <code>s3://BUCKET/inference/modelo_v1/predictions_2026_07_29.csv</code>
+  * Baseline: <code>s3://BUCKET/baseline/modelo_v1.csv</code>
+  * Output: <code>s3://BUCKET/reports/modelo_v1/predictions_2026_07_29.json</code>
 
 ### Upload do Baseline
 
