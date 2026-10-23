@@ -1,9 +1,16 @@
-
 # Monitoramento de Drift de Multiplos Modelos na AWS
+
+### Introduçào
 
 <p align="justify">Este projeto implementa uma solucao serverless, automatizada e de baixo custo para monitoramento continuo de Drift dos Dados e Drift do Modelo em pipelines de Machine Learning multi-tenant na AWS. A arquitetura e totalmente orientada a eventos, acionada via Amazon S3 e executada atraves do AWS Lambda em Python 3.11, utilizando uma abordagem estrita via AWS CLI e sem dependencia de interfaces visuais pesadas.</p>
 
 <p align="justify">Como diferencial, esta implementacao prioriza simplicidade operacional. Enquanto solucoes como o Evidently AI normalmente exigem uma estrutura mais complexa, envolvendo diversos arquivos de configuracao, dashboards, dependencias adicionais e, em alguns cenarios, componentes baseados em Node.js para interfaces web, este projeto utiliza apenas servicos nativos da AWS, uma unica funcao Lambda e comandos da AWS CLI. Isso reduz significativamente a complexidade de implantacao, manutencao e operacao, tornando a solucao mais leve, portavel e adequada para ambientes de producao que necessitam monitorar multiplos modelos de Machine Learning com baixo custo.</p>
+
+### Detecção de Gatilho e Arquitetura de Pastas (`lambda_handler`)
+O script intercepta arquivos CSV que são enviados para o S3. Ele espera uma estrutura de pastas específica baseada na seguinte convenção:
+* **Entrada de Inferência:** `inference/{endpoint_id}/<data_id>.csv` (o upload desse arquivo dispara a função).
+* **Baseline (Dados de Referência):** `baseline/{endpoint_id}.csv` (usado como gabarito histórico para comparar os dados novos).
+* **Ground Truth (Realidade):** `ground_truth/{endpoint_id}/<data_id>.csv` (dados reais posteriores para avaliar o erro do modelo).
 
 ---
 
@@ -11,15 +18,15 @@
 
 <p align="justify">A arquitetura utiliza o Amazon S3 como ponto central de armazenamento para os dados de referencia, dados de inferencia, rotulos verdadeiros e relatorios gerados. Sempre que um novo lote de inferencia e enviado para o bucket, um evento do Amazon S3 dispara automaticamente uma funcao AWS Lambda responsavel pela execucao dos testes de Drift dos Dados. Posteriormente, quando os valores reais das predicoes ficam disponiveis, outra execucao calcula as metricas de desempenho do modelo para identificar possivel Drift do Modelo.</p>
 
-<p align="justify">A deteccao de Drift dos Dados utiliza o teste estatistico Kolmogorov-Smirnov (KS) para comparar cada variavel do conjunto de inferencia com sua distribuicao de referencia. Para o monitoramento do modelo sao calculadas metricas como Accuracy, Precision, Recall, F1-Score e AUC para problemas de classificacao ou RMSE e MAE para problemas de regressao, comparando os resultados atuais com o baseline historico.</p>
+<p align="justify">A deteccao de Drift dos Dados utiliza o teste estatistico Kolmogorov-Smirnov (KS) para variaveis numericas e comparacao de frequencia de proporcao para variaveis categoricas. Para o monitoramento do modelo sao calculadas metricas de regressao (MAE e RMSE) comparando as predicoes com o ground truth.</p>
 
 <p align="justify">O fluxo de armazenamento segue a estrutura abaixo:</p>
 
 - `s3://$BUCKET_NAME/baseline/{endpoint_id}.csv` — Dados utilizados como distribuicao de referencia.
-- `s3://$BUCKET_NAME/inference/{endpoint_id}/{data}.csv` — Dados recebidos em producao.
-- `s3://$BUCKET_NAME/ground_truth/{endpoint_id}/{data}.csv` — Rotulos reais utilizados para avaliar o desempenho do modelo.
-- `s3://$BUCKET_NAME/reports/{endpoint_id}/data_drift/{data}.json` — Resultado do monitoramento de Drift dos Dados.
-- `s3://$BUCKET_NAME/reports/{endpoint_id}/model_drift/{data}.json` — Resultado do monitoramento de Drift do Modelo.
+- `s3://$BUCKET_NAME/inference/{endpoint_id}/{data_id}.csv` — Dados recebidos em producao (gatilho).
+- `s3://$BUCKET_NAME/ground_truth/{endpoint_id}/{data_id}.csv` — Rotulos reais utilizados para avaliar o desempenho do modelo.
+- `s3://$BUCKET_NAME/reports/{endpoint_id}/data_drift/{data_id}.json` — Resultado do monitoramento de Drift dos Dados.
+- `s3://$BUCKET_NAME/reports/{endpoint_id}/model_drift/{data_id}.json` — Resultado do monitoramento de Drift do Modelo.
 
 ---
 
@@ -30,6 +37,7 @@
                │
                ▼
         Upload Inference
+   (inference/{endpoint_id}/)
                │
                ▼
      Evento ObjectCreated no S3
@@ -37,22 +45,20 @@
                ▼
           AWS Lambda
                │
-      Teste Kolmogorov-Smirnov
+   KS Test (Num) + Proporcao (Cat)
                │
                ▼
-     Gerar Relatorio Drift dos Dados
+     Gerar Relatorio Data Drift
                │
                ▼
       Aguarda Ground Truth
+  (ground_truth/{endpoint_id}/)
                │
                ▼
-      Calculo das Metricas
+      Calculo MAE / RMSE
                │
                ▼
- Comparacao com Baseline Historico
-               │
-               ▼
-     Gerar Relatorio Drift do Modelo
+     Gerar Relatorio Model Drift
 ```
 
 ---
@@ -184,17 +190,17 @@ aws s3api put-bucket-notification-configuration \
 
 ### Mapeamento de Arquivos de Relatório (Data Drift vs. Model Drift)
 
-<p align="justify">A arquitetura reutiliza exatamente a mesma regra de nomenclatura para relatórios de Data Drift (características de entrada) e Model/Concept Drift (saídas e predições). O relatório gerado na pasta <code>reports/</code> preserva o identificador do endpoint e o nome exato do lote processado, alterando apenas a extensão de entrada para formato JSON.</p>
+<p align="justify">A arquitetura reutiliza o identificador do endpoint para localizar o baseline e o ground truth. Ao salvar os arquivos em <code>reports/</code>, preserva-se o mesmo nome do arquivo de inferência, alterando a extensão para JSON.</p>
 
 * **Data Drift (Input Features):**
-  * Input: <code>s3://BUCKET/inference/modelo_v1/lote_2026_07_29.csv</code>
-  * Baseline: <code>s3://BUCKET/baseline/modelo_v1.csv</code>
-  * Output: <code>s3://BUCKET/reports/modelo_v1/lote_2026_07_29.json</code>
+  * Entrada: <code>s3://BUCKET/inference/modelo_01/lote_2026_07_29.csv</code>
+  * Baseline: <code>s3://BUCKET/baseline/modelo_01.csv</code>
+  * Relatório: <code>s3://BUCKET/reports/modelo_01/data_drift/lote_2026_07_29.json</code>
 
-* **Model Drift (Output/Predictions):**
-  * Input: <code>s3://BUCKET/inference/modelo_v1/predictions_2026_07_29.csv</code>
-  * Baseline: <code>s3://BUCKET/baseline/modelo_v1.csv</code>
-  * Output: <code>s3://BUCKET/reports/modelo_v1/predictions_2026_07_29.json</code>
+* **Model Drift (Output/Predictions vs Ground Truth):**
+  * Entrada: <code>s3://BUCKET/inference/modelo_01/lote_2026_07_29.csv</code>
+  * Ground Truth: <code>s3://BUCKET/ground_truth/modelo_01/lote_2026_07_29.csv</code>
+  * Relatório: <code>s3://BUCKET/reports/modelo_01/model_drift/lote_2026_07_29.json</code>
 
 ### Upload do Baseline
 
@@ -237,32 +243,30 @@ s3://$BUCKET_NAME/reports/modelo_01/model_drift/2026-07-29.json -
 
 ## Estrutura dos Relatorios
 
-### Drift dos Dados
+### Data Drift
 
 ```json
 {
-  "endpoint":"modelo_01",
-  "drift_detected":true,
-  "ks_statistics":{
-    "temperatura":0.24,
-    "umidade":0.18,
-    "pressao":0.07
+  "endpoint": "modelo_01",
+  "drift_detected": true,
+  "ks_statistics": {
+    "temperatura": 0.24,
+    "umidade": 0.18,
+    "pressao": 0.07
   }
 }
 ```
 
-### Drift do Modelo
+### Model Drift
 
 ```json
 {
-  "endpoint":"modelo_01",
-  "accuracy_baseline":0.96,
-  "accuracy_current":0.90,
-  "precision":0.91,
-  "recall":0.89,
-  "f1_score":0.90,
-  "auc":0.94,
-  "model_drift":true
+  "endpoint": "modelo_01",
+  "metrics": {
+    "mae": 1.2345,
+    "rmse": 1.8765
+  },
+  "model_drift": false
 }
 ```
 
@@ -283,7 +287,7 @@ s3://$BUCKET_NAME/reports/modelo_01/model_drift/2026-07-29.json -
 ## Vantagens da Solucao
 
 - Arquitetura totalmente serverless.
-- Monitoramento simultaneo de Drift dos Dados e Drift do Modelo.
+- Monitoramento simultaneo de Data Drift (Numérico e Categórico) e Model Drift.
 - Suporte a multiplos modelos utilizando uma unica funcao Lambda.
 - Arquitetura orientada a eventos utilizando Amazon S3.
 - Implantacao completa utilizando apenas AWS CLI.
@@ -300,7 +304,4 @@ s3://$BUCKET_NAME/reports/modelo_01/model_drift/2026-07-29.json -
 
 ## Conclusao
 
-<p align="justify">A solucao demonstra que o monitoramento de Drift dos Dados e Drift do Modelo pode ser implementado de maneira simples, escalavel e com custo extremamente reduzido utilizando exclusivamente servicos nativos da AWS. O uso combinado do Amazon S3, AWS Lambda e Amazon CloudWatch elimina a necessidade de infraestrutura dedicada, permitindo que novos lotes de dados sejam processados automaticamente por meio de eventos. Alem da deteccao de alteracoes nas distribuicoes das variaveis de entrada utilizando o teste Kolmogorov-Smirnov, o projeto acompanha continuamente a degradacao do desempenho dos modelos por meio de metricas de classificacao ou regressao, fornecendo uma estrategia completa para monitoramento de modelos em producao.</p>
-
-<p align="justify">Em comparacao com ferramentas mais robustas, como o Evidently AI, esta implementacao prioriza simplicidade, portabilidade e facilidade de implantacao. Toda a infraestrutura pode ser criada utilizando apenas AWS CLI, uma unica funcao Lambda e recursos nativos da plataforma, dispensando dashboards complexos, componentes adicionais, dependencias baseadas em Node.js e estruturas compostas por diversos arquivos de configuracao. O resultado e uma arquitetura enxuta, de facil manutencao e adequada tanto para ambientes experimentais quanto para sistemas de producao que necessitam monitorar centenas de modelos com baixo custo operacional.</p>
-````
+<p align="justify">A solucao demonstra que o monitoramento de Drift dos Dados e Drift do Modelo pode ser implementado de maneira simples, escalavel e com custo extremamente reduzido utilizando exclusivamente servicos nativos da AWS. O uso combinado do Amazon S3, AWS Lambda e Amazon CloudWatch elimina a necessidade de infraestrutura dedicada, permitindo que novos lotes de dados sejam processados automaticamente por meio de eventos.</p>
